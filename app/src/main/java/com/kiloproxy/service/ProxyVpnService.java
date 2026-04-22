@@ -1,4 +1,4 @@
-package com.proxytunnel.service;
+package com.kiloproxy.service;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -14,12 +14,12 @@ import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
-import com.proxytunnel.R;
-import com.proxytunnel.model.ProxyProfile;
-import com.proxytunnel.tunnel.LocalSocks5Bridge;
-import com.proxytunnel.tunnel.TunnelJni;
-import com.proxytunnel.ui.MainActivity;
-import com.proxytunnel.util.ProfileManager;
+import com.kiloproxy.R;
+import com.kiloproxy.model.ProxyProfile;
+import com.kiloproxy.tunnel.LocalSocks5Bridge;
+import com.kiloproxy.tunnel.TunnelJni;
+import com.kiloproxy.ui.MainActivity;
+import com.kiloproxy.util.ProfileManager;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
@@ -49,6 +49,7 @@ public class ProxyVpnService extends VpnService {
     public static final String ACTION_START  = "com.kiloproxy.START";
     public static final String ACTION_STOP   = "com.kiloproxy.STOP";
     public static final String ACTION_STATUS = "com.kiloproxy.STATUS";
+    private static final String TAG_VPN     = "KILOProxy";
     public static final String EXTRA_RUNNING = "running";
     public static final String EXTRA_ERROR   = "error";
 
@@ -138,8 +139,20 @@ public class ProxyVpnService extends VpnService {
             tunnelThread = Executors.newSingleThreadExecutor();
             tunnelThread.submit(() -> {
                 Log.i(TAG, "hev-socks5-tunnel starting, fd=" + tunFd);
-                int rc = TunnelJni.mainFromStr(config, tunFd);
-                Log.i(TAG, "hev-socks5-tunnel exited: " + rc);
+                try {
+                    int rc = TunnelJni.mainFromStr(config, tunFd);
+                    Log.i(TAG, "hev-socks5-tunnel exited: " + rc);
+                } catch (UnsatisfiedLinkError e) {
+                    Log.e(TAG, "Native library error: " + e.getMessage());
+                    new Handler(Looper.getMainLooper()).post(() ->
+                        broadcastStatus(false, "Native library not loaded"));
+                    stopVpn();
+                } catch (Throwable e) {
+                    Log.e(TAG, "Tunnel crashed: " + e.getMessage());
+                    new Handler(Looper.getMainLooper()).post(() ->
+                        broadcastStatus(false, e.getMessage()));
+                    stopVpn();
+                }
             });
 
             startStatsPoller();

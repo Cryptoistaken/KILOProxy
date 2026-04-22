@@ -1,4 +1,4 @@
-package com.proxytunnel.ui;
+package com.kiloproxy.ui;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -17,11 +17,11 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
 
-import com.proxytunnel.R;
-import com.proxytunnel.databinding.ActivityMainBinding;
-import com.proxytunnel.model.ProxyProfile;
-import com.proxytunnel.service.ProxyVpnService;
-import com.proxytunnel.util.ProfileManager;
+import com.kiloproxy.R;
+import com.kiloproxy.databinding.ActivityMainBinding;
+import com.kiloproxy.model.ProxyProfile;
+import com.kiloproxy.service.ProxyVpnService;
+import com.kiloproxy.util.ProfileManager;
 
 import java.util.List;
 import java.util.Locale;
@@ -32,6 +32,7 @@ public class MainActivity extends AppCompatActivity implements ProfileAdapter.Pr
     private ProfileManager profileManager;
     private ProfileAdapter adapter;
     private boolean vpnRunning = false;
+    private boolean receiverRegistered = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Runnable statsUpdater;
 
@@ -209,9 +210,12 @@ public class MainActivity extends AppCompatActivity implements ProfileAdapter.Pr
     @Override
     protected void onResume() {
         super.onResume();
-        registerReceiver(statusReceiver,
-            new IntentFilter(ProxyVpnService.ACTION_STATUS),
-            Context.RECEIVER_NOT_EXPORTED);
+        if (!receiverRegistered) {
+            registerReceiver(statusReceiver,
+                new IntentFilter(ProxyVpnService.ACTION_STATUS),
+                Context.RECEIVER_NOT_EXPORTED);
+            receiverRegistered = true;
+        }
         refreshProfiles();
         syncVpnState();
     }
@@ -219,7 +223,10 @@ public class MainActivity extends AppCompatActivity implements ProfileAdapter.Pr
     @Override
     protected void onPause() {
         super.onPause();
-        unregisterReceiver(statusReceiver);
+        if (receiverRegistered) {
+            try { unregisterReceiver(statusReceiver); } catch (IllegalArgumentException ignored) {}
+            receiverRegistered = false;
+        }
     }
 
     @Override

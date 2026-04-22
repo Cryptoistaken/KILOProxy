@@ -1,10 +1,10 @@
-package com.proxytunnel.tunnel;
+package com.kiloproxy.tunnel;
 
 import android.util.Log;
 
-import com.proxytunnel.model.ProxyProfile;
-import com.proxytunnel.service.HttpConnectHandler;
-import com.proxytunnel.service.Socks5Handler;
+import com.kiloproxy.model.ProxyProfile;
+import com.kiloproxy.service.HttpConnectHandler;
+import com.kiloproxy.service.Socks5Handler;
 
 import java.io.IOException;
 import java.io.InputStream;

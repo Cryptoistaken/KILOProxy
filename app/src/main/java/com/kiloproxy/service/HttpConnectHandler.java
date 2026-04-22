@@ -1,4 +1,4 @@
-package com.proxytunnel.service;
+package com.kiloproxy.service;
 
 import java.io.IOException;
 import java.io.InputStream;

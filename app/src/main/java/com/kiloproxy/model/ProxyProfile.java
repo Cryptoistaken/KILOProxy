@@ -1,4 +1,4 @@
-package com.proxytunnel.model;
+package com.kiloproxy.model;
 
 import java.util.UUID;
 

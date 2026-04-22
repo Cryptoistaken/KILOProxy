@@ -1,4 +1,4 @@
-package com.proxytunnel.tunnel;
+package com.kiloproxy.tunnel;
 
 /**
  * Clean API wrapper around TProxyService (the raw JNI class).

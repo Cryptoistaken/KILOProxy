@@ -1,4 +1,4 @@
-package com.proxytunnel.ui;
+package com.kiloproxy.ui;
 
 import android.view.LayoutInflater;
 import android.view.View;
@@ -10,8 +10,8 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.proxytunnel.R;
-import com.proxytunnel.model.ProxyProfile;
+import com.kiloproxy.R;
+import com.kiloproxy.model.ProxyProfile;
 
 import java.util.ArrayList;
 import java.util.List;

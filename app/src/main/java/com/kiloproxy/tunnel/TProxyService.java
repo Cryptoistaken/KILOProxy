@@ -1,4 +1,4 @@
-package com.proxytunnel.tunnel;
+package com.kiloproxy.tunnel;
 
 import android.util.Log;
 

@@ -1,11 +1,11 @@
-package com.proxytunnel.util;
+package com.kiloproxy.util;
 
 import android.content.Context;
 import android.content.SharedPreferences;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
-import com.proxytunnel.model.ProxyProfile;
+import com.kiloproxy.model.ProxyProfile;
 
 import java.lang.reflect.Type;
 import java.util.ArrayList;

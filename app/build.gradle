@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace 'com.proxytunnel'
+    namespace 'com.kiloproxy'
     compileSdk 35
     ndkVersion "27.1.12297006"
 
