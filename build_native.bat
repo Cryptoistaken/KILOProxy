@@ -1,0 +1,3 @@
+@echo off
+echo Starting KILOProxy native build...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_native.ps1"

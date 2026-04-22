@@ -7,6 +7,8 @@ import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.VpnService;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
@@ -14,116 +16,138 @@ import androidx.core.app.NotificationCompat;
 
 import com.proxytunnel.R;
 import com.proxytunnel.model.ProxyProfile;
+import com.proxytunnel.tunnel.LocalSocks5Bridge;
+import com.proxytunnel.tunnel.TunnelJni;
 import com.proxytunnel.ui.MainActivity;
 import com.proxytunnel.util.ProfileManager;
 
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.InetAddress;
-import java.net.Socket;
-import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * ProxyVpnService - creates a local TUN interface and forwards all TCP traffic
- * through the configured HTTP or SOCKS5 proxy server.
+ * KILOProxy VPN Service — powered by hev-socks5-tunnel (tun2socks)
  *
  * Packet flow:
- *   App traffic → TUN device → ProxyVpnService → reads IP packets →
- *   parses TCP header → opens socket to proxy → HTTP CONNECT or SOCKS5 handshake →
- *   relay bytes both ways
+ *   All device apps
+ *       ↓  IP packets
+ *   Android TUN device  (10.99.0.1/24, established by VpnService.Builder)
+ *       ↓  tun_fd passed to native lib
+ *   hev-socks5-tunnel   (lwIP TCP/IP stack, handles TCP + UDP)
+ *       ↓  SOCKS5 protocol
+ *   LocalSocks5Bridge   (only for HTTP proxy profiles — translates to HTTP CONNECT)
+ *       ↓  HTTP CONNECT
+ *   ─── OR ───
+ *   Real SOCKS5 upstream  (for SOCKS5 proxy profiles, no bridge needed)
  */
 public class ProxyVpnService extends VpnService {
 
-    private static final String TAG = "ProxyVpnService";
-    private static final String CHANNEL_ID = "proxy_tunnel_channel";
-    private static final int NOTIFICATION_ID = 1;
+    private static final String TAG        = "KILOProxy";
+    private static final String CHANNEL_ID = "kiloproxy_channel";
+    private static final int    NOTIF_ID   = 1;
 
-    public static final String ACTION_START = "com.proxytunnel.START";
-    public static final String ACTION_STOP  = "com.proxytunnel.STOP";
+    public static final String ACTION_START  = "com.kiloproxy.START";
+    public static final String ACTION_STOP   = "com.kiloproxy.STOP";
+    public static final String ACTION_STATUS = "com.kiloproxy.STATUS";
+    public static final String EXTRA_RUNNING = "running";
+    public static final String EXTRA_ERROR   = "error";
 
-    // Broadcast sent back to UI
-    public static final String ACTION_STATUS = "com.proxytunnel.STATUS";
-    public static final String EXTRA_RUNNING  = "running";
-    public static final String EXTRA_ERROR    = "error";
+    private static volatile long    bytesSent     = 0;
+    private static volatile long    bytesReceived = 0;
+    private static volatile boolean isRunning     = false;
+
+    public static boolean isRunning()     { return isRunning; }
+    public static long getBytesSent()     { return bytesSent; }
+    public static long getBytesReceived() { return bytesReceived; }
 
     private ParcelFileDescriptor vpnInterface;
-    private ExecutorService threadPool;
-    private AtomicBoolean running = new AtomicBoolean(false);
-    private ProxyProfile activeProfile;
+    private ExecutorService      tunnelThread;
+    private LocalSocks5Bridge    httpBridge;
+    private ProxyProfile         activeProfile;
+    private final Handler        statsHandler  = new Handler(Looper.getMainLooper());
+    private Runnable             statsRunnable;
 
-    // Simple packet counter for display
-    private static volatile long bytesSent = 0;
-    private static volatile long bytesReceived = 0;
-    private static volatile boolean isRunning = false;
-
-    public static boolean isRunning() { return isRunning; }
-    public static long getBytesSent() { return bytesSent; }
-    public static long getBytesReceived() { return bytesReceived; }
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
-
         String action = intent.getAction();
-        if (ACTION_STOP.equals(action)) {
-            stopVpn();
-            return START_NOT_STICKY;
-        }
-
+        if (ACTION_STOP.equals(action)) { stopVpn(); return START_NOT_STICKY; }
         if (ACTION_START.equals(action)) {
             activeProfile = ProfileManager.getInstance(this).getActiveProfile();
             if (activeProfile == null) {
                 broadcastStatus(false, "No proxy profile selected");
-                stopSelf();
-                return START_NOT_STICKY;
+                stopSelf(); return START_NOT_STICKY;
+            }
+            if (!TunnelJni.isAvailable()) {
+                broadcastStatus(false, "Native library not found. Run build_native.ps1 first.");
+                stopSelf(); return START_NOT_STICKY;
             }
             startVpn();
         }
         return START_STICKY;
     }
 
+    @Override
+    public void onDestroy() { stopVpn(); super.onDestroy(); }
+
+    // ── Start ─────────────────────────────────────────────────────────────────
+
     private void startVpn() {
         createNotificationChannel();
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting…"));
-
+        startForeground(NOTIF_ID, buildNotification("Connecting…"));
         try {
-            Builder builder = new Builder();
-            builder.setSession("ProxyTunnel");
-            // Give the TUN a virtual address; all traffic will be intercepted
-            builder.addAddress("10.0.0.2", 32);
-            builder.addRoute("0.0.0.0", 0); // route all IPv4 traffic
-            builder.addDnsServer("8.8.8.8");
-            builder.addDnsServer("8.8.4.4");
-            // Exclude our own app to avoid loopback
-            builder.addDisallowedApplication(getPackageName());
+            // 1. Establish TUN interface
+            vpnInterface = new Builder()
+                .setSession("KILOProxy")
+                .addAddress("10.99.0.1", 24)
+                .addRoute("0.0.0.0", 0)
+                .addRoute("::", 0)
+                .addDnsServer("8.8.8.8")
+                .addDnsServer("1.1.1.1")
+                .setMtu(8500)
+                .addDisallowedApplication(getPackageName())
+                .establish();
 
-            vpnInterface = builder.establish();
             if (vpnInterface == null) {
                 broadcastStatus(false, "VPN permission denied");
-                stopSelf();
-                return;
+                stopSelf(); return;
             }
 
-            running.set(true);
-            isRunning = true;
-            bytesSent = 0;
-            bytesReceived = 0;
+            // 2. HTTP proxy → start local SOCKS5 bridge; SOCKS5 proxy → direct
+            String socks5Host;
+            int    socks5Port;
+            if (ProxyProfile.TYPE_HTTP.equals(activeProfile.getType())) {
+                httpBridge = new LocalSocks5Bridge(activeProfile);
+                httpBridge.start();
+                socks5Host = "127.0.0.1";
+                socks5Port = LocalSocks5Bridge.LOCAL_PORT;
+                Log.i(TAG, "HTTP proxy → bridge on 127.0.0.1:" + socks5Port);
+            } else {
+                httpBridge = null;
+                socks5Host = activeProfile.getHost();
+                socks5Port = activeProfile.getPort();
+            }
 
-            threadPool = Executors.newCachedThreadPool();
+            // 3. Build YAML config and launch native tunnel
+            String config = buildConfig(socks5Host, socks5Port);
+            int    tunFd  = vpnInterface.getFd();
 
-            // Main packet reading loop
-            threadPool.submit(this::packetLoop);
+            isRunning = true; bytesSent = 0; bytesReceived = 0;
+            tunnelThread = Executors.newSingleThreadExecutor();
+            tunnelThread.submit(() -> {
+                Log.i(TAG, "hev-socks5-tunnel starting, fd=" + tunFd);
+                int rc = TunnelJni.mainFromStr(config, tunFd);
+                Log.i(TAG, "hev-socks5-tunnel exited: " + rc);
+            });
 
-            updateNotification("Connected via " + activeProfile.getType()
-                    + " → " + activeProfile.getDisplayAddress());
+            startStatsPoller();
+            String desc = activeProfile.getType() + " → "
+                        + activeProfile.getHost() + ":" + activeProfile.getPort();
+            updateNotification("Connected · " + desc);
             broadcastStatus(true, null);
-            Log.i(TAG, "VPN started with profile: " + activeProfile.getName());
+            Log.i(TAG, "VPN started: " + activeProfile.getName());
 
         } catch (Exception e) {
             Log.e(TAG, "Failed to start VPN", e);
@@ -132,121 +156,73 @@ public class ProxyVpnService extends VpnService {
         }
     }
 
-    /**
-     * Reads IP packets from the TUN interface.
-     * For each TCP connection (identified by dest IP + port), opens a proxy tunnel.
-     * NOTE: This is a simplified implementation. A production-grade tun2socks
-     * approach is recommended for full protocol support. This handles TCP streams.
-     */
-    private void packetLoop() {
-        FileInputStream in = new FileInputStream(vpnInterface.getFileDescriptor());
-        FileOutputStream out = new FileOutputStream(vpnInterface.getFileDescriptor());
+    // ── Stats poller ──────────────────────────────────────────────────────────
 
-        ByteBuffer packet = ByteBuffer.allocate(32767);
-
-        while (running.get()) {
-            try {
-                packet.clear();
-                int length = in.read(packet.array());
-                if (length <= 0) {
-                    Thread.sleep(10);
-                    continue;
-                }
-                packet.limit(length);
-
-                // Parse IP header
-                byte versionIhl = packet.get(0);
-                int version = (versionIhl >> 4) & 0xF;
-                if (version != 4) continue; // Only IPv4
-
-                int ihl = (versionIhl & 0xF) * 4;
-                int protocol = packet.get(9) & 0xFF;
-
-                // Only handle TCP (protocol 6)
-                if (protocol != 6) continue;
-
-                // Extract destination IP
-                byte[] destIpBytes = new byte[4];
-                packet.position(16);
-                packet.get(destIpBytes);
-                String destIp = InetAddress.getByAddress(destIpBytes).getHostAddress();
-
-                // Extract destination port from TCP header
-                int destPort = ((packet.get(ihl + 2) & 0xFF) << 8) | (packet.get(ihl + 3) & 0xFF);
-
-                // Handle DNS specially (port 53 → forward to 8.8.8.8 directly)
-                // For all other TCP, proxy it
-                threadPool.submit(() -> handleTcpConnection(destIp, destPort, packet.array(), length, out));
-
-            } catch (InterruptedException e) {
-                break;
-            } catch (Exception e) {
-                if (running.get()) Log.e(TAG, "Packet loop error", e);
+    private void startStatsPoller() {
+        statsRunnable = new Runnable() {
+            @Override public void run() {
+                if (!isRunning) return;
+                bytesSent     = TunnelJni.getBytesSent();
+                bytesReceived = TunnelJni.getBytesReceived();
+                statsHandler.postDelayed(this, 1000);
             }
+        };
+        statsHandler.postDelayed(statsRunnable, 1000);
+    }
+
+    private void stopStatsPoller() {
+        if (statsRunnable != null) {
+            statsHandler.removeCallbacks(statsRunnable);
+            statsRunnable = null;
         }
     }
 
-    private void handleTcpConnection(String destIp, int destPort, byte[] originalPacket,
-                                      int packetLength, FileOutputStream tunOut) {
-        try {
-            Socket proxySocket = new Socket();
-            protect(proxySocket); // CRITICAL: prevent VPN loop
+    // ── YAML config builder ───────────────────────────────────────────────────
 
-            proxySocket.connect(
-                new java.net.InetSocketAddress(activeProfile.getHost(), activeProfile.getPort()),
-                10000
-            );
-
-            // Perform proxy handshake
-            if (ProxyProfile.TYPE_SOCKS5.equals(activeProfile.getType())) {
-                Socks5Handler.connect(proxySocket, destIp, destPort,
-                    activeProfile.getUsername(), activeProfile.getPassword());
-            } else {
-                HttpConnectHandler.connect(proxySocket, destIp, destPort,
-                    activeProfile.getUsername(), activeProfile.getPassword());
-            }
-
-            // Relay traffic bidirectionally
-            InputStream proxyIn = proxySocket.getInputStream();
-            OutputStream proxyOut = proxySocket.getOutputStream();
-
-            // Forward original payload to proxy
-            if (packetLength > 0) {
-                proxyOut.write(originalPacket, 0, packetLength);
-                proxyOut.flush();
-                bytesSent += packetLength;
-            }
-
-            // Relay proxy responses back to TUN
-            byte[] buf = new byte[4096];
-            int read;
-            while ((read = proxyIn.read(buf)) != -1) {
-                tunOut.write(buf, 0, read);
-                bytesReceived += read;
-            }
-
-            proxySocket.close();
-
-        } catch (IOException e) {
-            // Connection errors are common (timeouts, refused, etc.) - log quietly
-            Log.d(TAG, "TCP relay error to " + destIp + ":" + destPort + " - " + e.getMessage());
+    private String buildConfig(String socks5Host, int socks5Port) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("tunnel:\n");
+        sb.append("  mtu: 8500\n");
+        sb.append("  ipv4: 10.99.0.1\n");
+        sb.append("  ipv6: 'fc00::1'\n");
+        sb.append("socks5:\n");
+        sb.append("  address: '").append(socks5Host).append("'\n");
+        sb.append("  port: ").append(socks5Port).append("\n");
+        // Pass credentials only for direct SOCKS5 (bridge handles HTTP auth itself)
+        if (ProxyProfile.TYPE_SOCKS5.equals(activeProfile.getType())
+                && activeProfile.isRequiresAuth()
+                && activeProfile.getUsername() != null
+                && !activeProfile.getUsername().isEmpty()) {
+            sb.append("  username: '").append(escape(activeProfile.getUsername())).append("'\n");
+            sb.append("  password: '").append(escape(activeProfile.getPassword())).append("'\n");
         }
+        sb.append("  udp: 'tcp'\n");
+        sb.append("misc:\n");
+        sb.append("  task-stack-size: 81920\n");
+        sb.append("  tcp-buffer-size: 65536\n");
+        sb.append("  connect-timeout: 10000\n");
+        sb.append("  tcp-read-write-timeout: 300000\n");
+        sb.append("  log-level: warn\n");
+        return sb.toString();
     }
+
+    /** Escape single-quotes in YAML string values */
+    private static String escape(String s) {
+        return s == null ? "" : s.replace("'", "''");
+    }
+
+    // ── Stop ──────────────────────────────────────────────────────────────────
 
     private void stopVpn() {
-        running.set(false);
+        if (!isRunning && vpnInterface == null) return;
         isRunning = false;
-        if (threadPool != null) {
-            threadPool.shutdownNow();
-        }
+        stopStatsPoller();
+        try { TunnelJni.quit(); } catch (Throwable ignored) {}
+        if (tunnelThread != null) { tunnelThread.shutdownNow(); tunnelThread = null; }
+        if (httpBridge   != null) { httpBridge.stop();          httpBridge   = null; }
         try {
-            if (vpnInterface != null) {
-                vpnInterface.close();
-                vpnInterface = null;
-            }
-        } catch (IOException e) {
-            Log.e(TAG, "Error closing VPN interface", e);
-        }
+            if (vpnInterface != null) { vpnInterface.close(); vpnInterface = null; }
+        } catch (IOException e) { Log.e(TAG, "Close VPN error", e); }
         broadcastStatus(false, null);
         stopForeground(true);
         stopSelf();
@@ -254,51 +230,40 @@ public class ProxyVpnService extends VpnService {
     }
 
     private void broadcastStatus(boolean running, String error) {
-        Intent intent = new Intent(ACTION_STATUS);
-        intent.putExtra(EXTRA_RUNNING, running);
-        if (error != null) intent.putExtra(EXTRA_ERROR, error);
-        sendBroadcast(intent);
+        Intent i = new Intent(ACTION_STATUS);
+        i.putExtra(EXTRA_RUNNING, running);
+        if (error != null) i.putExtra(EXTRA_ERROR, error);
+        sendBroadcast(i);
     }
 
-    @Override
-    public void onDestroy() {
-        stopVpn();
-        super.onDestroy();
-    }
-
-    // ─── Notification helpers ─────────────────────────────────────────────────
+    // ── Notifications ─────────────────────────────────────────────────────────
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID, "Proxy Tunnel", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("Shows proxy tunnel connection status");
-            getSystemService(NotificationManager.class).createNotificationChannel(channel);
+            NotificationChannel ch = new NotificationChannel(
+                CHANNEL_ID, "KILOProxy", NotificationManager.IMPORTANCE_LOW);
+            ch.setDescription("Proxy tunnel status");
+            getSystemService(NotificationManager.class).createNotificationChannel(ch);
         }
     }
 
     private Notification buildNotification(String text) {
-        Intent intent = new Intent(this, MainActivity.class);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, intent,
+        PendingIntent open = PendingIntent.getActivity(this, 0,
+            new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        Intent stopI = new Intent(this, ProxyVpnService.class).setAction(ACTION_STOP);
+        PendingIntent stop = PendingIntent.getService(this, 1, stopI,
             PendingIntent.FLAG_IMMUTABLE);
-
-        Intent stopIntent = new Intent(this, ProxyVpnService.class);
-        stopIntent.setAction(ACTION_STOP);
-        PendingIntent stopPi = PendingIntent.getService(this, 0, stopIntent,
-            PendingIntent.FLAG_IMMUTABLE);
-
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("ProxyTunnel")
-            .setContentText(text)
+            .setContentTitle("KILOProxy").setContentText(text)
             .setSmallIcon(R.drawable.ic_vpn_key)
-            .setContentIntent(pi)
-            .addAction(R.drawable.ic_stop, "Disconnect", stopPi)
-            .setOngoing(true)
+            .setContentIntent(open)
+            .addAction(R.drawable.ic_stop, "Disconnect", stop)
+            .setOngoing(true).setPriority(NotificationCompat.PRIORITY_LOW)
             .build();
     }
 
     private void updateNotification(String text) {
-        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        nm.notify(NOTIFICATION_ID, buildNotification(text));
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(NOTIF_ID, buildNotification(text));
     }
 }
