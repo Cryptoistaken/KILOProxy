@@ -1,0 +1,25 @@
+# Built outputs
+*.apk
+*.aab
+*.dex
+
+# Build directories
+build/
+app/build/
+.gradle/
+
+# Local config (never commit)
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Gradle cache metadata
+.gradle/
+gradle.properties.bak
+
+# Keystore (never commit secrets)
+*.jks
+*.keystore

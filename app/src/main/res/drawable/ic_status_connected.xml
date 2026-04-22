@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="72dp"
+    android:height="72dp"
+    android:viewportWidth="72"
+    android:viewportHeight="72">
+    <path
+        android:fillColor="#1B5E20"
+        android:pathData="M36,4C18.3,4 4,18.3 4,36C4,53.7 18.3,68 36,68C53.7,68 68,53.7 68,36C68,18.3 53.7,4 36,4Z"/>
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M36,10C21.6,10 10,21.6 10,36C10,50.4 21.6,62 36,62C50.4,62 62,50.4 62,36C62,21.6 50.4,10 36,10Z"/>
+    <!-- Shield icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,18L22,24V36C22,44.8 28,53 36,55C44,53 50,44.8 50,36V24L36,18ZM34,43L26,35L28.8,32.2L34,37.4L43.2,28.2L46,31L34,43Z"/>
+</vector>
