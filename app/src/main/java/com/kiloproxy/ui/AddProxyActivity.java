@@ -1,6 +1,8 @@
 package com.kiloproxy.ui;
 
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.View;
@@ -11,7 +13,14 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import com.kiloproxy.databinding.ActivityAddProxyBinding;
 import com.kiloproxy.model.ProxyProfile;
+import com.kiloproxy.service.HttpConnectHandler;
+import com.kiloproxy.service.Socks5Handler;
 import com.kiloproxy.util.ProfileManager;
+
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class AddProxyActivity extends AppCompatActivity {
 
@@ -28,9 +37,20 @@ public class AddProxyActivity extends AppCompatActivity {
     private static final int FMT_C    =  2; // User:Pass:Host:Port
     private static final int FMT_D    =  3; // Host:Port@User:Pass
 
+    /** Timeout for the proxy connectivity test (ms). */
+    private static final int TEST_TIMEOUT_MS = 10_000;
+
+    /** A known public host:port we CONNECT through the proxy to verify it works. */
+    private static final String TEST_DEST_HOST = "www.google.com";
+    private static final int    TEST_DEST_PORT = 80;
+
     private ActivityAddProxyBinding binding;
     private ProfileManager profileManager;
     private ProxyProfile editingProfile;
+    private boolean suppressTextWatcher = false;
+
+    private final ExecutorService testExecutor = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,6 +78,12 @@ public class AddProxyActivity extends AppCompatActivity {
         }
     }
 
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        testExecutor.shutdownNow();
+    }
+
     // ── UI setup ──────────────────────────────────────────────────────────────
 
     private void setupUI() {
@@ -75,7 +101,8 @@ public class AddProxyActivity extends AppCompatActivity {
         binding.switchAuth.setOnCheckedChangeListener((btn, checked) ->
             binding.layoutAuthFields.setVisibility(checked ? View.VISIBLE : View.GONE));
 
-        binding.btnSave.setOnClickListener(v -> saveProfile());
+        // The save button now triggers a test first, then saves on success.
+        binding.btnSave.setOnClickListener(v -> validateAndTest());
     }
 
     // ── Proxy string paste ────────────────────────────────────────────────────
@@ -86,6 +113,7 @@ public class AddProxyActivity extends AppCompatActivity {
             @Override public void onTextChanged(CharSequence s, int st, int b, int c) {}
             @Override
             public void afterTextChanged(Editable s) {
+                if (suppressTextWatcher) return;
                 String raw = s.toString().trim();
                 if (raw.isEmpty()) {
                     binding.layoutProxyStringHint.setError(null);
@@ -116,7 +144,6 @@ public class AddProxyActivity extends AppCompatActivity {
      */
     private ParsedProxy detectAndParse(String raw) {
         // ── Format B: User:Pass@Host:Port ─────────────────────────────────────
-        // Split on first '@'
         int atB = raw.indexOf('@');
         if (atB > 0 && atB < raw.length() - 1) {
             String left  = raw.substring(0, atB);
@@ -136,8 +163,8 @@ public class AddProxyActivity extends AppCompatActivity {
         }
 
         // ── Format D: Host:Port@User:Pass ─────────────────────────────────────
-        int atD = raw.indexOf('@');
-        if (atD > 0 && atD < raw.length() - 1) {
+        int atD = raw.lastIndexOf('@');
+        if (atD > 0 && atD < raw.length() - 1 && atD != atB) {
             String left  = raw.substring(0, atD);
             String right = raw.substring(atD + 1);
             int colonLeft = left.lastIndexOf(':');
@@ -154,25 +181,20 @@ public class AddProxyActivity extends AppCompatActivity {
             }
         }
 
-        // ── Format A: Host:Port:User:Pass  or  Format C: User:Pass:Host:Port ──
-        // Both are 4 colon-separated tokens (port is always numeric, second token for A / fourth for C)
+        // ── Format A / C ──────────────────────────────────────────────────────
         String[] parts = raw.split(":", 4);
         if (parts.length == 4) {
-            // Try Format A: tokens[1] = port (numeric), tokens[0] = host
             Integer portA = parsePort(parts[1]);
             if (portA != null) {
-                // second token is a valid port → assume Host:Port:User:Pass
                 return new ParsedProxy(parts[0], portA, parts[2], parts[3], FMT_A);
             }
-            // Try Format C: tokens[3] = port (numeric), tokens[2] = host
             Integer portC = parsePort(parts[3]);
             if (portC != null) {
-                // fourth token is a valid port → assume User:Pass:Host:Port
                 return new ParsedProxy(parts[2], portC, parts[0], parts[1], FMT_C);
             }
         }
 
-        return null; // no match
+        return null;
     }
 
     private void fillFromParsed(ParsedProxy p) {
@@ -186,7 +208,6 @@ public class AddProxyActivity extends AppCompatActivity {
             binding.editPassword.setText(p.password);
         }
 
-        // Auto-fill a profile name if the field is empty
         if (binding.editName.getText().toString().trim().isEmpty()) {
             binding.editName.setText(p.host + ":" + p.port);
         }
@@ -216,6 +237,7 @@ public class AddProxyActivity extends AppCompatActivity {
     // ── Field population (edit mode) ──────────────────────────────────────────
 
     private void populateFields() {
+        suppressTextWatcher = true;
         binding.editName.setText(editingProfile.getName());
         binding.editHost.setText(editingProfile.getHost());
         binding.editPort.setText(String.valueOf(editingProfile.getPort()));
@@ -232,11 +254,20 @@ public class AddProxyActivity extends AppCompatActivity {
             binding.editUsername.setText(editingProfile.getUsername());
             binding.editPassword.setText(editingProfile.getPassword());
         }
+        suppressTextWatcher = false;
     }
 
-    // ── Save ──────────────────────────────────────────────────────────────────
+    // ── Validate → Test → Save ────────────────────────────────────────────────
 
-    private void saveProfile() {
+    /**
+     * Step 1: Validate fields.
+     * Step 2: Show a "Testing…" progress dialog and fire the connection test on
+     *         a background thread.
+     * Step 3a: On success → commit the profile and finish.
+     * Step 3b: On failure → show the error and keep the user on the form.
+     */
+    private void validateAndTest() {
+        // ── Basic field validation ────────────────────────────────────────────
         String name    = binding.editName.getText().toString().trim();
         String host    = binding.editHost.getText().toString().trim();
         String portStr = binding.editPort.getText().toString().trim();
@@ -258,16 +289,119 @@ public class AddProxyActivity extends AppCompatActivity {
             ? ProxyProfile.TYPE_SOCKS5
             : ProxyProfile.TYPE_HTTP;
 
+        String username = null;
+        String password = null;
+        if (binding.switchAuth.isChecked()) {
+            username = binding.editUsername.getText().toString().trim();
+            password = binding.editPassword.getText().toString();
+            if (username.isEmpty()) {
+                binding.editUsername.setError("Username required");
+                return;
+            }
+        }
+
+        // Capture final copies for the lambda
+        final String finalHost     = host;
+        final int    finalPort     = port;
+        final String finalType     = type;
+        final String finalUsername = username;
+        final String finalPassword = password;
+        final String finalName     = name;
+
+        // ── Show testing dialog ───────────────────────────────────────────────
+        AlertDialog progressDialog = new AlertDialog.Builder(this)
+            .setTitle("Testing Connection")
+            .setMessage("Connecting to " + host + ":" + port + "…")
+            .setCancelable(false)
+            .create();
+        progressDialog.show();
+
+        setFormEnabled(false);
+
+        // ── Run test on background thread ─────────────────────────────────────
+        testExecutor.submit(() -> {
+            String errorMsg = testProxyConnection(
+                finalHost, finalPort, finalType, finalUsername, finalPassword);
+
+            mainHandler.post(() -> {
+                progressDialog.dismiss();
+                setFormEnabled(true);
+
+                if (errorMsg == null) {
+                    // ── SUCCESS: commit and close ─────────────────────────────
+                    commitProfile(finalName, finalHost, finalPort, finalType,
+                                  finalUsername, finalPassword);
+                } else {
+                    // ── FAILURE: tell the user, stay on form ──────────────────
+                    new AlertDialog.Builder(this)
+                        .setTitle("Connection Failed")
+                        .setMessage(
+                            "Could not connect to the proxy:\n\n" + errorMsg +
+                            "\n\nPlease check the host, port, and credentials and try again.")
+                        .setPositiveButton("OK", null)
+                        .show();
+                }
+            });
+        });
+    }
+
+    /**
+     * Attempts a real connection through the proxy to a known public endpoint.
+     * Runs on a background thread.
+     *
+     * @return null on success, or a human-readable error message on failure.
+     */
+    private String testProxyConnection(String host, int port, String type,
+                                        String username, String password) {
+        Socket socket = new Socket();
+        try {
+            socket.connect(new InetSocketAddress(host, port), TEST_TIMEOUT_MS);
+            socket.setSoTimeout(TEST_TIMEOUT_MS);
+
+            if (ProxyProfile.TYPE_SOCKS5.equals(type)) {
+                Socks5Handler.connect(socket, TEST_DEST_HOST, TEST_DEST_PORT,
+                                      username, password);
+            } else {
+                HttpConnectHandler.connect(socket, TEST_DEST_HOST, TEST_DEST_PORT,
+                                           username, password);
+            }
+            return null; // success
+
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            return (msg != null && !msg.isEmpty()) ? msg : e.getClass().getSimpleName();
+        } finally {
+            try { socket.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** Enable or disable all interactive form controls while testing. */
+    private void setFormEnabled(boolean enabled) {
+        binding.btnSave.setEnabled(enabled);
+        binding.editName.setEnabled(enabled);
+        binding.editHost.setEnabled(enabled);
+        binding.editPort.setEnabled(enabled);
+        binding.editProxyString.setEnabled(enabled);
+        binding.radioHttp.setEnabled(enabled);
+        binding.radioSocks5.setEnabled(enabled);
+        binding.switchAuth.setEnabled(enabled);
+        binding.editUsername.setEnabled(enabled);
+        binding.editPassword.setEnabled(enabled);
+    }
+
+    /**
+     * Persist the profile (add or update) and close the activity.
+     * Called only after a successful connection test.
+     */
+    private void commitProfile(String name, String host, int port, String type,
+                                String username, String password) {
         ProxyProfile profile = editingProfile != null ? editingProfile : new ProxyProfile();
         profile.setName(name);
         profile.setHost(host);
         profile.setPort(port);
         profile.setType(type);
 
-        if (binding.switchAuth.isChecked()) {
-            String username = binding.editUsername.getText().toString().trim();
-            String password = binding.editPassword.getText().toString();
-            if (username.isEmpty()) { binding.editUsername.setError("Username required"); return; }
+        if (username != null && !username.isEmpty()) {
             profile.setRequiresAuth(true);
             profile.setUsername(username);
             profile.setPassword(password);
@@ -282,7 +416,7 @@ public class AddProxyActivity extends AppCompatActivity {
             Toast.makeText(this, "Profile updated", Toast.LENGTH_SHORT).show();
         } else {
             profileManager.addProfile(profile);
-            Toast.makeText(this, "Profile added", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Proxy added successfully", Toast.LENGTH_SHORT).show();
         }
         finish();
     }

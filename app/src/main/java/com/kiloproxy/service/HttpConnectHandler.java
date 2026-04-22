@@ -41,30 +41,46 @@ public class HttpConnectHandler {
         request.append("Proxy-Connection: Keep-Alive\r\n");
         request.append("\r\n");
 
-        out.write(request.toString().getBytes(StandardCharsets.US_ASCII));
+        out.write(request.toString().getBytes(StandardCharsets.UTF_8));
         out.flush();
 
-        // Read response headers
-        StringBuilder response = new StringBuilder();
-        int prev = -1, cur;
-        while ((cur = in.read()) != -1) {
-            response.append((char) cur);
-            // End of headers = \r\n\r\n
-            if (prev == '\n' && cur == '\r') {
-                // could be end soon
-            }
-            if (response.length() >= 4) {
-                String tail = response.substring(response.length() - 4);
-                if (tail.equals("\r\n\r\n")) break;
-            }
-            prev = cur;
-        }
+        // Add a timeout to avoid infinite blocking
+        int oldTimeout = socket.getSoTimeout();
+        socket.setSoTimeout(10000); // 10 seconds timeout
 
-        String responseStr = response.toString();
-        if (!responseStr.startsWith("HTTP/1.") || !responseStr.contains(" 200")) {
-            // Extract status line for better error message
-            String statusLine = responseStr.split("\r\n")[0];
-            throw new IOException("HTTP CONNECT failed: " + statusLine);
+        try {
+            // Read response headers
+            StringBuilder response = new StringBuilder();
+            int cur;
+            boolean foundHeaderEnd = false;
+
+            // Limit to 8192 bytes to avoid memory exhaustion from garbage data
+            while (response.length() < 8192 && (cur = in.read()) != -1) {
+                response.append((char) cur);
+                if (response.length() >= 4 && response.substring(response.length() - 4).equals("\r\n\r\n")) {
+                    foundHeaderEnd = true;
+                    break;
+                }
+            }
+
+            if (!foundHeaderEnd) {
+                throw new IOException("HTTP CONNECT failed: Invalid response or header too large");
+            }
+
+            String responseStr = response.toString();
+            String[] lines = responseStr.split("\r\n", 2);
+            String statusLine = lines.length > 0 ? lines[0].trim() : "";
+
+            if (!statusLine.startsWith("HTTP/1.")) {
+                throw new IOException("HTTP CONNECT failed: " + statusLine);
+            }
+
+            String[] statusParts = statusLine.split(" ", 3);
+            if (statusParts.length < 2 || !"200".equals(statusParts[1])) {
+                throw new IOException("HTTP CONNECT failed: " + statusLine);
+            }
+        } finally {
+            socket.setSoTimeout(oldTimeout);
         }
         // Tunnel established
     }

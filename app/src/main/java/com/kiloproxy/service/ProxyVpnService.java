@@ -120,9 +120,8 @@ public class ProxyVpnService extends VpnService {
             int    socks5Port;
             if (ProxyProfile.TYPE_HTTP.equals(activeProfile.getType())) {
                 httpBridge = new LocalSocks5Bridge(activeProfile);
-                httpBridge.start();
+                socks5Port = httpBridge.start();
                 socks5Host = "127.0.0.1";
-                socks5Port = LocalSocks5Bridge.LOCAL_PORT;
                 Log.i(TAG, "HTTP proxy → bridge on 127.0.0.1:" + socks5Port);
             } else {
                 httpBridge = null;
@@ -220,9 +219,16 @@ public class ProxyVpnService extends VpnService {
         return sb.toString();
     }
 
-    /** Escape single-quotes in YAML string values */
+    /** Escape special characters in YAML string values */
     private static String escape(String s) {
-        return s == null ? "" : s.replace("'", "''");
+        if (s == null) return "";
+        return s.replace("\\", "\\\\")
+                .replace("'", "''")
+                .replace("\"", "\\\"")
+                .replace(":", "\\:")
+                .replace("#", "\\#")
+                .replace("[", "\\[")
+                .replace("]", "\\]");
     }
 
     // ── Stop ──────────────────────────────────────────────────────────────────

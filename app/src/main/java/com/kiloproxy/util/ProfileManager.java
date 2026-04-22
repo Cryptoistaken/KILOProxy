@@ -25,7 +25,7 @@ public class ProfileManager {
         gson = new Gson();
     }
 
-    public static ProfileManager getInstance(Context context) {
+    public static synchronized ProfileManager getInstance(Context context) {
         if (instance == null) {
             instance = new ProfileManager(context);
         }

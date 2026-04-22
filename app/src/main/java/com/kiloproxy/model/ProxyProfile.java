@@ -54,6 +54,9 @@ public class ProxyProfile {
     public void setRequiresAuth(boolean requiresAuth) { this.requiresAuth = requiresAuth; }
 
     public String getDisplayAddress() {
+        if (host == null || host.isEmpty()) {
+            return "Not set";
+        }
         return host + ":" + port;
     }
 }

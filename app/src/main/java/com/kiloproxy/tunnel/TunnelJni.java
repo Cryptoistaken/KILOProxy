@@ -27,26 +27,39 @@ public class TunnelJni {
     }
 
     /**
-     * Returns cumulative bytes sent (upload).
+     * Returns cumulative bytes sent (upload) as an unsigned 32-bit value
+     * promoted to long. Safe for values up to 4 GiB.
+     *
+     * The native side packs stats as: high-32 = TX (sent), low-32 = RX (received).
+     * We use Integer.toUnsignedLong() to guarantee the result is always >= 0,
+     * even when the raw 32-bit value has bit-31 set (would look negative as int).
      */
     public static long getBytesSent() {
-        return (TProxyService.GetStats(false) >>> 32) & 0xFFFFFFFFL;
+        long packed = TProxyService.GetStats(false);
+        return Integer.toUnsignedLong((int) (packed >>> 32));
     }
 
     /**
-     * Returns cumulative bytes received (download).
+     * Returns cumulative bytes received (download) as an unsigned 32-bit value
+     * promoted to long. Safe for values up to 4 GiB.
      */
     public static long getBytesReceived() {
-        return TProxyService.GetStats(false) & 0xFFFFFFFFL;
+        long packed = TProxyService.GetStats(false);
+        return Integer.toUnsignedLong((int) packed);
     }
 
     /**
      * Returns both stats in one native call to ensure consistency.
+     * Using Integer.toUnsignedLong avoids sign-extension when bit-31 is set.
+     *
      * @return long[]{bytesSent, bytesReceived}
      */
     public static long[] getStats() {
         long packed = TProxyService.GetStats(false);
-        return new long[]{(packed >>> 32) & 0xFFFFFFFFL, packed & 0xFFFFFFFFL};
+        return new long[]{
+            Integer.toUnsignedLong((int) (packed >>> 32)),  // TX / sent
+            Integer.toUnsignedLong((int) packed)            // RX / received
+        };
     }
 
     /**

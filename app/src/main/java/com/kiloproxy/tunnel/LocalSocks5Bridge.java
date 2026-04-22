@@ -49,7 +49,7 @@ public class LocalSocks5Bridge {
     public int start() throws IOException {
         serverSocket = new ServerSocket();
         serverSocket.setReuseAddress(true);
-        serverSocket.bind(new InetSocketAddress("127.0.0.1", LOCAL_PORT));
+        serverSocket.bind(new InetSocketAddress("127.0.0.1", 0));
         running.set(true);
         pool = Executors.newCachedThreadPool();
         pool.submit(this::acceptLoop);
@@ -82,6 +82,7 @@ public class LocalSocks5Bridge {
 
     private void handleClient(Socket client) {
         try (Socket c = client) {
+            c.setSoTimeout(30_000); // 30 s read timeout — prevents threads blocking forever
             InputStream  cIn  = c.getInputStream();
             OutputStream cOut = c.getOutputStream();
 
@@ -119,16 +120,17 @@ public class LocalSocks5Bridge {
             int destPort = ((portBytes[0] & 0xFF) << 8) | (portBytes[1] & 0xFF);
 
             // ── Connect to real upstream proxy ───────────────────────────────
-            Socket upstream = new Socket();
-            upstream.setTcpNoDelay(true);
-            upstream.connect(new InetSocketAddress(
+            Socket upstreamSocket = new Socket();
+            upstreamSocket.setTcpNoDelay(true);
+            upstreamSocket.connect(new InetSocketAddress(
                 this.upstream.getHost(), this.upstream.getPort()), 10000);
+            upstreamSocket.setSoTimeout(30000);
 
             try {
-                HttpConnectHandler.connect(upstream, destHost, destPort,
+                HttpConnectHandler.connect(upstreamSocket, destHost, destPort,
                     this.upstream.getUsername(), this.upstream.getPassword());
             } catch (IOException e) {
-                upstream.close();
+                upstreamSocket.close();
                 cOut.write(new byte[]{0x05, 0x05, 0x00, 0x01, 0,0,0,0, 0,0}); // CONNECTION_REFUSED
                 return;
             }
@@ -138,19 +140,23 @@ public class LocalSocks5Bridge {
             cOut.flush();
 
             // ── Bidirectional relay ──────────────────────────────────────────
-            relay(cIn, cOut, upstream);
+            relay(cIn, cOut, upstreamSocket);
 
         } catch (IOException e) {
             Log.d(TAG, "Client error: " + e.getMessage());
         }
     }
 
-    private void relay(InputStream cIn, OutputStream cOut, Socket upstream) throws IOException {
-        InputStream  uIn  = upstream.getInputStream();
-        OutputStream uOut = upstream.getOutputStream();
+    private void relay(InputStream cIn, OutputStream cOut, Socket upstreamSocket) throws IOException {
+        // We need references to both sockets so either thread can shut both down.
+        // The client socket is the outer try-with-resources in handleClient(); we close
+        // upstreamSocket here and let the IOException propagate to close the client.
+        InputStream  uIn  = upstreamSocket.getInputStream();
+        OutputStream uOut = upstreamSocket.getOutputStream();
 
-        AtomicBoolean done = new AtomicBoolean(false);
+        AtomicBoolean closed = new AtomicBoolean(false);
 
+        // upstream→client thread
         Thread t = new Thread(() -> {
             byte[] buf = new byte[8192];
             try {
@@ -161,13 +167,17 @@ public class LocalSocks5Bridge {
                 }
             } catch (IOException ignored) {
             } finally {
-                done.set(true);
-                try { upstream.close(); } catch (IOException ignored) {}
+                // Always close upstream; also wake the main thread by closing its input
+                closed.set(true);
+                try { upstreamSocket.close(); } catch (IOException ignored) {}
+                // Interrupt main thread's cIn.read() by closing the client input stream
+                try { cIn.close(); } catch (IOException ignored) {}
             }
         });
         t.setDaemon(true);
         t.start();
 
+        // client→upstream (main thread)
         byte[] buf = new byte[8192];
         try {
             int n;
@@ -177,7 +187,14 @@ public class LocalSocks5Bridge {
             }
         } catch (IOException ignored) {
         } finally {
-            try { upstream.close(); } catch (IOException ignored) {}
+            // Close upstream to unblock the background thread if still reading
+            if (!closed.getAndSet(true)) {
+                try { upstreamSocket.close(); } catch (IOException ignored) {}
+            }
+            // Wait briefly for the background thread to drain before we return
+            try { t.join(500); } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

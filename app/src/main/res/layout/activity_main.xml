@@ -179,7 +179,7 @@
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
         android:contentDescription="Add proxy profile"
-        android:src="@android:drawable/ic_input_add"
+        android:src="@drawable/ic_edit"
         app:layout_behavior="com.google.android.material.behavior.HideBottomViewOnScrollBehavior" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
