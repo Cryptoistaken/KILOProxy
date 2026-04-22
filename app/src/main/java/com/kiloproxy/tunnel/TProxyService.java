@@ -23,10 +23,12 @@ import android.util.Log;
 public class TProxyService {
 
     private static final String TAG = "KILOProxy/JNI";
+    private static boolean nativeLoaded = false;
 
     static {
         try {
             System.loadLibrary("hev-socks5-tunnel");
+            nativeLoaded = true;
             Log.i(TAG, "libhev-socks5-tunnel.so loaded");
         } catch (UnsatisfiedLinkError e) {
             Log.e(TAG, "Failed to load libhev-socks5-tunnel.so: " + e.getMessage());
@@ -58,12 +60,6 @@ public class TProxyService {
 
     /** @return true if the .so loaded successfully */
     public static boolean isAvailable() {
-        try {
-            // Attempt a harmless reflective check — if the class loaded, so did the lib
-            TProxyService.class.getDeclaredMethods();
-            return true;
-        } catch (UnsatisfiedLinkError e) {
-            return false;
-        }
+        return nativeLoaded;
     }
 }

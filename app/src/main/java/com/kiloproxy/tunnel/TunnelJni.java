@@ -30,16 +30,23 @@ public class TunnelJni {
      * Returns cumulative bytes sent (upload).
      */
     public static long getBytesSent() {
-        long packed = TProxyService.GetStats(false);
-        return (packed >>> 32) & 0xFFFFFFFFL;
+        return (TProxyService.GetStats(false) >>> 32) & 0xFFFFFFFFL;
     }
 
     /**
      * Returns cumulative bytes received (download).
      */
     public static long getBytesReceived() {
+        return TProxyService.GetStats(false) & 0xFFFFFFFFL;
+    }
+
+    /**
+     * Returns both stats in one native call to ensure consistency.
+     * @return long[]{bytesSent, bytesReceived}
+     */
+    public static long[] getStats() {
         long packed = TProxyService.GetStats(false);
-        return packed & 0xFFFFFFFFL;
+        return new long[]{(packed >>> 32) & 0xFFFFFFFFL, packed & 0xFFFFFFFFL};
     }
 
     /**

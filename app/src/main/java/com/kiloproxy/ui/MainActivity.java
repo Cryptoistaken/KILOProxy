@@ -211,9 +211,14 @@ public class MainActivity extends AppCompatActivity implements ProfileAdapter.Pr
     protected void onResume() {
         super.onResume();
         if (!receiverRegistered) {
-            registerReceiver(statusReceiver,
-                new IntentFilter(ProxyVpnService.ACTION_STATUS),
-                Context.RECEIVER_NOT_EXPORTED);
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(statusReceiver,
+                    new IntentFilter(ProxyVpnService.ACTION_STATUS),
+                    Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(statusReceiver,
+                    new IntentFilter(ProxyVpnService.ACTION_STATUS));
+            }
             receiverRegistered = true;
         }
         refreshProfiles();

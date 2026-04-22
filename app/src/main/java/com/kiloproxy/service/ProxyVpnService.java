@@ -49,7 +49,6 @@ public class ProxyVpnService extends VpnService {
     public static final String ACTION_START  = "com.kiloproxy.START";
     public static final String ACTION_STOP   = "com.kiloproxy.STOP";
     public static final String ACTION_STATUS = "com.kiloproxy.STATUS";
-    private static final String TAG_VPN     = "KILOProxy";
     public static final String EXTRA_RUNNING = "running";
     public static final String EXTRA_ERROR   = "error";
 
@@ -165,6 +164,7 @@ public class ProxyVpnService extends VpnService {
         } catch (Exception e) {
             Log.e(TAG, "Failed to start VPN", e);
             broadcastStatus(false, e.getMessage());
+            stopForeground(true);
             stopSelf();
         }
     }
@@ -175,8 +175,9 @@ public class ProxyVpnService extends VpnService {
         statsRunnable = new Runnable() {
             @Override public void run() {
                 if (!isRunning) return;
-                bytesSent     = TunnelJni.getBytesSent();
-                bytesReceived = TunnelJni.getBytesReceived();
+                long[] stats  = TunnelJni.getStats();
+                bytesSent     = stats[0];
+                bytesReceived = stats[1];
                 statsHandler.postDelayed(this, 1000);
             }
         };
@@ -227,7 +228,7 @@ public class ProxyVpnService extends VpnService {
     // ── Stop ──────────────────────────────────────────────────────────────────
 
     private void stopVpn() {
-        if (!isRunning && vpnInterface == null) return;
+        if (!isRunning && vpnInterface == null && httpBridge == null) return;
         isRunning = false;
         stopStatsPoller();
         try { TunnelJni.quit(); } catch (Throwable ignored) {}

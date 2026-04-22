@@ -155,7 +155,10 @@ public class LocalSocks5Bridge {
             byte[] buf = new byte[8192];
             try {
                 int n;
-                while ((n = uIn.read(buf)) != -1) cOut.write(buf, 0, n);
+                while ((n = uIn.read(buf)) != -1) {
+                    cOut.write(buf, 0, n);
+                    cOut.flush();
+                }
             } catch (IOException ignored) {
             } finally {
                 done.set(true);
@@ -168,7 +171,10 @@ public class LocalSocks5Bridge {
         byte[] buf = new byte[8192];
         try {
             int n;
-            while ((n = cIn.read(buf)) != -1) uOut.write(buf, 0, n);
+            while ((n = cIn.read(buf)) != -1) {
+                uOut.write(buf, 0, n);
+                uOut.flush();
+            }
         } catch (IOException ignored) {
         } finally {
             try { upstream.close(); } catch (IOException ignored) {}
